@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 
 import requests
 from loguru import logger
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,8 @@ from .widgets import DragDropFrame, ImagePreview, LogConsole
 
 
 class MainWindow(QMainWindow):
+    log_message = Signal(str)
+
     def __init__(self) -> None:
         super().__init__()
         setup_logger()
@@ -54,6 +56,7 @@ class MainWindow(QMainWindow):
         self._start_time = 0.0
 
         self._setup_ui()
+        self.log_message.connect(self._append_log)
 
     def _setup_ui(self) -> None:
         self.setWindowTitle(APP_NAME)
@@ -121,6 +124,8 @@ class MainWindow(QMainWindow):
         section = QVBoxLayout()
 
         self.table = QTableWidget(0, 6, self)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setHorizontalHeaderLabels([
             "Work Permit",
             "Passport",
@@ -131,6 +136,8 @@ class MainWindow(QMainWindow):
         ])
         self.table.setSortingEnabled(True)
         self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.currentCellChanged.connect(lambda _current, _previous: self._on_selection_changed())
         section.addWidget(self.table)
 
         self.photo_preview = ImagePreview(self)
@@ -158,15 +165,20 @@ class MainWindow(QMainWindow):
 
     def _attach_log_handler(self) -> None:
         def _append_log(message: str) -> None:
-            self.log_console.append(message)
+            self.log_message.emit(message)
 
         logger.add(_append_log, level="INFO", enqueue=True)
+
+    @Slot(str)
+    def _append_log(self, message: str) -> None:
+        self.log_console.append(message)
 
     def _apply_dark_mode(self, enabled: bool) -> None:
         if enabled:
             self.setStyleSheet(
                 "QWidget { background: #121212; color: #f0f0f0; } "
-                "QTableWidget { gridline-color: #444; } "
+                "QTableWidget { gridline-color: #444; background: #121212; color: #f0f0f0; } "
+                "QTableWidget::item { color: #ffffff; background: transparent; } "
                 "QHeaderView::section { background: #1f1f1f; color: #f0f0f0; } "
                 "QPushButton { background: #1f1f1f; border: 1px solid #333; padding: 6px; } "
                 "QPushButton:hover { background: #2a2a2a; }"
@@ -186,11 +198,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setText(f"Progress: {completed}/{total}")
 
     def _load_workers_to_table(self, workers: List) -> None:
-        self.table.setRowCount(0)
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(len(workers))
         self._worker_index.clear()
 
         for i, worker in enumerate(workers):
-            self.table.insertRow(i)
             self.table.setItem(i, 0, QTableWidgetItem(worker.work_permit_number))
             self.table.setItem(i, 1, QTableWidgetItem(worker.passport_number))
             self.table.setItem(i, 2, QTableWidgetItem(worker.worker_name or ""))
@@ -198,6 +210,21 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 4, QTableWidgetItem(worker.status or ""))
             self.table.setItem(i, 5, QTableWidgetItem(worker.permit_valid_till or ""))
             self._worker_index[worker.work_permit_number.strip().upper()] = i
+
+        self.table.setSortingEnabled(True)
+        self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, max(self.table.columnWidth(0), 140))
+        self.table.setColumnWidth(1, max(self.table.columnWidth(1), 140))
+        self.table.scrollToTop()
+
+    def _find_row_for_permit(self, permit: str) -> Optional[int]:
+        if not permit:
+            return None
+        items = self.table.findItems(permit, Qt.MatchExactly)
+        for item in items:
+            if item.column() == 0:
+                return item.row()
+        return None
 
     def _on_load_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -285,7 +312,9 @@ class MainWindow(QMainWindow):
 
     def _apply_worker_result(self, worker) -> None:
         key = worker.work_permit_number.strip().upper()
-        idx = self._worker_index.get(key)
+        idx = self._find_row_for_permit(key)
+        if idx is None:
+            idx = self._worker_index.get(key)
         if idx is None:
             return
 
@@ -340,6 +369,15 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_cell_clicked(self, row: int, _col: int) -> None:
+        self._show_photo_for_row(row)
+
+    @Slot()
+    def _on_selection_changed(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0:
+            self._show_photo_for_row(row)
+
+    def _show_photo_for_row(self, row: int) -> None:
         permit_item = self.table.item(row, 0)
         if not permit_item:
             return
@@ -349,18 +387,22 @@ class MainWindow(QMainWindow):
             self.photo_preview.setText("No photo available")
             return
 
-        # Fetch image in background and update
+        self.photo_preview.setText("Loading photo...")
         QTimer.singleShot(0, lambda: self._load_photo(worker.photo_url))
 
     def _load_photo(self, url: str) -> None:
         try:
-            resp = requests.get(url, timeout=10)
+            resp = self.client.session_manager.request("GET", url, timeout=10)
             resp.raise_for_status()
+            content_type = resp.headers.get("Content-Type", "")
+            if not content_type.lower().startswith("image"):
+                raise ValueError(f"Unexpected content type: {content_type}")
             pixmap = QPixmap()
-            pixmap.loadFromData(resp.content)
+            if not pixmap.loadFromData(resp.content):
+                raise ValueError("Failed to decode image")
             self.photo_preview.set_image(pixmap)
-        except Exception:
-            self.photo_preview.setText("Failed to load photo")
+        except Exception as exc:
+            self.photo_preview.setText(f"Failed to load photo: {exc}")
 
     def closeEvent(self, event) -> None:
         """Handle app close event - clean up resources."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from threading import Lock
 from typing import Optional
 
 import requests
@@ -23,6 +24,7 @@ class SessionManager:
         self.session = requests.Session()
         self.session.headers.update(REQUEST_HEADERS)
         self._last_refresh = None
+        self._session_lock = Lock()
 
     @classmethod
     def get_instance(cls) -> "SessionManager":
@@ -39,10 +41,15 @@ class SessionManager:
         url = "https://xpat.egov.mv/"
         try:
             logger.debug("Refreshing XPAT session cookies")
-            self.session.get(url, timeout=10)
+            with self._session_lock:
+                self.session.get(url, timeout=10)
             self._last_refresh = True
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to refresh session cookies: %s", exc)
 
     def get_session(self) -> requests.Session:
         return self.session
+
+    def request(self, method: str, url: str, **kwargs) -> requests.Response:
+        with self._session_lock:
+            return self.session.request(method, url, **kwargs)

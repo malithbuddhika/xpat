@@ -63,7 +63,6 @@ class XpatClient:
             cached.last_verified = datetime.utcnow()
             return cached
 
-        session = self.session_manager.get_session()
         self.session_manager.refresh()
 
         data = {
@@ -79,7 +78,8 @@ class XpatClient:
 
             try:
                 logger.debug("Posting verification for %s (attempt %s)", work_permit_number, attempt)
-                response = session.post(
+                response = self.session_manager.request(
+                    "POST",
                     XPAT_VERIFY_URL,
                     data=data,
                     timeout=REQUEST_TIMEOUT,

@@ -135,6 +135,8 @@ class MainWindow(QMainWindow):
         section = QVBoxLayout()
 
         self.table = QTableWidget(0, 7, self)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setHorizontalHeaderLabels([
             "Work Permit",
             "Passport",
@@ -151,6 +153,8 @@ class MainWindow(QMainWindow):
         self.table.setMinimumHeight(350)
         self.table.setWordWrap(False)
         self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.currentCellChanged.connect(lambda _current, _previous: self._on_selection_changed())
         section.addWidget(self.table)
 
         self.photo_preview = ImagePreview(self)
@@ -261,6 +265,15 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(0, max(self.table.columnWidth(0), 140))
         self.table.setColumnWidth(1, max(self.table.columnWidth(1), 140))
         self.table.scrollToTop()
+
+    def _find_row_for_permit(self, permit: str) -> Optional[int]:
+        if not permit:
+            return None
+        items = self.table.findItems(permit, Qt.MatchExactly)
+        for item in items:
+            if item.column() == 0:
+                return item.row()
+        return None
 
     def _on_load_excel(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -388,6 +401,8 @@ class MainWindow(QMainWindow):
         key = worker.work_permit_number.strip().upper()
         idx = self._find_row_for_permit(key)
         if idx is None:
+            idx = self._find_row_for_permit(key)
+        if idx is None:
             idx = self._worker_index.get(key)
         if idx is None:
             return
@@ -459,6 +474,15 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def _on_cell_clicked(self, row: int, _col: int) -> None:
+        self._show_photo_for_row(row)
+
+    @Slot()
+    def _on_selection_changed(self) -> None:
+        row = self.table.currentRow()
+        if row >= 0:
+            self._show_photo_for_row(row)
+
+    def _show_photo_for_row(self, row: int) -> None:
         permit_item = self.table.item(row, 0)
         if not permit_item:
             return
@@ -468,7 +492,6 @@ class MainWindow(QMainWindow):
             self.photo_preview.setText("No photo available")
             return
 
-        # Fetch image in background and update
         self.photo_preview.setText("Loading photo...")
         if self.photo_executor is None:
             self.photo_executor = ThreadPoolExecutor(max_workers=1)
